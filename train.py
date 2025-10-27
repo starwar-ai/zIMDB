@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
+from torch.cuda.amp import autocast, GradScaler
+from torch.utils.checkpoint import checkpoint
 from modelscope.msdatasets import MsDataset
 from modelscope.utils.constant import DownloadMode
 from collections import Counter
@@ -24,6 +26,11 @@ BATCH_SIZE = 64
 LEARNING_RATE = 0.001
 PAD_TOKEN = 0
 UNK_TOKEN = 1
+
+# 性能优化参数
+USE_AMP = True                    # 启用混合精度训练
+GRADIENT_ACCUMULATION_STEPS = 4   # 梯度累积步数 (有效batch = BATCH_SIZE * 4 = 256)
+USE_GRADIENT_CHECKPOINTING = True # 启用梯度检查点节省显存
 
 # 检查是否有可用的GPU
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -111,54 +118,76 @@ test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE)
 # --- 4. 定义 PyTorch 模型 (LSTM) ---
 
 class SentimentLSTM(nn.Module):
-    def __init__(self, vocab_size, embedding_dim, hidden_dim, output_dim, pad_idx):
+    def __init__(self, vocab_size, embedding_dim, hidden_dim, output_dim, pad_idx, use_checkpointing=False):
         super().__init__()
-        
+
         # 嵌入层
         # padding_idx=pad_idx 告诉嵌入层 PAD_TOKEN 是填充符，训练时应忽略
         self.embedding = nn.Embedding(vocab_size, embedding_dim, padding_idx=pad_idx)
-        
+
         # LSTM 层
-        self.lstm = nn.LSTM(embedding_dim, 
-                            hidden_dim, 
-                            num_layers=1, 
+        self.lstm = nn.LSTM(embedding_dim,
+                            hidden_dim,
+                            num_layers=1,
                             bidirectional=False, # 设置为False，使用单向LSTM
                             batch_first=True) # 输入数据格式为 (batch_size, seq_len, features)
-        
+
         # 全连接层
         self.fc = nn.Linear(hidden_dim, output_dim)
-        
+
+        # 梯度检查点标志
+        self.use_checkpointing = use_checkpointing
+
+    def _forward_lstm(self, embedded):
+        """LSTM前向传播的辅助函数，用于gradient checkpointing"""
+        _, (hidden, _) = self.lstm(embedded)
+        return hidden
+
     def forward(self, text):
         # text.shape = [batch_size, seq_len]
-        
+
         embedded = self.embedding(text)
         # embedded.shape = [batch_size, seq_len, embedding_dim]
-        
-        # lstm_out, (hidden, cell) = self.lstm(embedded)
-        # 我们只关心最后一个时间步的隐藏状态
-        # hidden.shape = [num_layers * num_directions, batch_size, hidden_dim]
-        _, (hidden, _) = self.lstm(embedded)
-        
+
+        # 使用gradient checkpointing节省显存
+        if self.use_checkpointing and self.training:
+            # checkpoint会在前向传播时不保存中间激活值，
+            # 在反向传播时重新计算，从而节省显存
+            hidden = checkpoint(self._forward_lstm, embedded, use_reentrant=False)
+        else:
+            # 正常前向传播
+            _, (hidden, _) = self.lstm(embedded)
+
         # 我们使用最后一个隐藏状态 (从最后一个时间步)
         # hidden.squeeze(0) 的 shape 是 [batch_size, hidden_dim]
         hidden_last = hidden.squeeze(0)
-        
+
         output = self.fc(hidden_last)
         # output.shape = [batch_size, output_dim]
-        
+
         # 移除维度，使其与标签 (batch_size) 匹配
         return output.squeeze(1)
 
 
 # --- 5. 实例化模型、损失函数和优化器 ---
 
-model = SentimentLSTM(len(vocab), EMBEDDING_DIM, HIDDEN_DIM, OUTPUT_DIM, PAD_TOKEN)
+model = SentimentLSTM(len(vocab), EMBEDDING_DIM, HIDDEN_DIM, OUTPUT_DIM, PAD_TOKEN,
+                      use_checkpointing=USE_GRADIENT_CHECKPOINTING)
 model.to(device)
 
-# 损失函数: BCEWithLogitsLoss 
+# 损失函数: BCEWithLogitsLoss
 # (它内置了Sigmoid，比单独用Sigmoid+BCELoss更稳定)
 criterion = nn.BCEWithLogitsLoss()
 optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+
+# 初始化混合精度训练的GradScaler
+scaler = GradScaler() if USE_AMP else None
+
+print(f"\n性能优化设置:")
+print(f"  混合精度训练 (AMP): {USE_AMP}")
+print(f"  梯度累积步数: {GRADIENT_ACCUMULATION_STEPS}")
+print(f"  有效批次大小: {BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS}")
+print(f"  梯度检查点: {USE_GRADIENT_CHECKPOINTING}")
 
 # --- 6. 训练和评估函数 ---
 
@@ -170,36 +199,74 @@ def calculate_accuracy(preds, y):
     acc = correct.sum() / len(correct)
     return acc
 
-def train_epoch(model, loader, optimizer, criterion):
+def train_epoch(model, loader, optimizer, criterion, scaler=None, accumulation_steps=1):
     epoch_loss = 0
     epoch_acc = 0
-    
+
     model.train() # 设置为训练模式
-    
-    for (text, labels) in loader:
+
+    optimizer.zero_grad() # 初始梯度清零
+
+    for idx, (text, labels) in enumerate(loader):
         text, labels = text.to(device), labels.to(device)
-        
-        # 1. 梯度清零
-        optimizer.zero_grad()
-        
-        # 2. 前向传播
-        predictions = model(text)
-        
-        # 3. 计算损失
-        loss = criterion(predictions, labels)
-        
-        # 4. 计算准确率
-        acc = calculate_accuracy(predictions, labels)
-        
-        # 5. 反向传播
-        loss.backward()
-        
-        # 6. 更新权重
-        optimizer.step()
-        
-        epoch_loss += loss.item()
+
+        # 使用混合精度训练
+        if scaler is not None:
+            # 使用autocast自动选择合适的精度
+            with autocast():
+                # 前向传播
+                predictions = model(text)
+                # 计算损失
+                loss = criterion(predictions, labels)
+                # 梯度累积：损失需要除以累积步数
+                loss = loss / accumulation_steps
+
+            # 计算准确率（在原始精度下）
+            with torch.no_grad():
+                acc = calculate_accuracy(predictions, labels)
+
+            # 反向传播（使用scaler处理梯度缩放）
+            scaler.scale(loss).backward()
+
+            # 只在累积足够步数后更新权重
+            if (idx + 1) % accumulation_steps == 0:
+                # scaler会自动处理梯度缩放、unscale和梯度裁剪
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
+        else:
+            # 不使用混合精度的标准训练
+            # 前向传播
+            predictions = model(text)
+            # 计算损失
+            loss = criterion(predictions, labels)
+            # 梯度累积：损失需要除以累积步数
+            loss = loss / accumulation_steps
+
+            # 计算准确率
+            acc = calculate_accuracy(predictions, labels)
+
+            # 反向传播
+            loss.backward()
+
+            # 只在累积足够步数后更新权重
+            if (idx + 1) % accumulation_steps == 0:
+                optimizer.step()
+                optimizer.zero_grad()
+
+        # 累积损失和准确率（注意这里loss已经除以了accumulation_steps）
+        epoch_loss += loss.item() * accumulation_steps  # 恢复原始损失用于统计
         epoch_acc += acc.item()
-        
+
+    # 处理最后不完整的批次
+    if len(loader) % accumulation_steps != 0:
+        if scaler is not None:
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            optimizer.step()
+        optimizer.zero_grad()
+
     return epoch_loss / len(loader), epoch_acc / len(loader)
 
 def evaluate_epoch(model, loader, criterion):
@@ -227,13 +294,15 @@ def evaluate_epoch(model, loader, criterion):
 print("\nStarting training...")
 for epoch in range(NUM_EPOCHS):
     start_time = time.time()
-    
-    train_loss, train_acc = train_epoch(model, train_loader, optimizer, criterion)
+
+    train_loss, train_acc = train_epoch(model, train_loader, optimizer, criterion,
+                                       scaler=scaler,
+                                       accumulation_steps=GRADIENT_ACCUMULATION_STEPS)
     test_loss, test_acc = evaluate_epoch(model, test_loader, criterion)
-    
+
     end_time = time.time()
     epoch_mins, epoch_secs = divmod(end_time - start_time, 60)
-    
+
     print(f'Epoch: {epoch+1:02} | Epoch Time: {epoch_mins:.0f}m {epoch_secs:.0f}s')
     print(f'\tTrain Loss: {train_loss:.3f} | Train Acc: {train_acc*100:.2f}%')
     print(f'\tTest. Loss: {test_loss:.3f} | Test. Acc: {test_acc*100:.2f}%')
