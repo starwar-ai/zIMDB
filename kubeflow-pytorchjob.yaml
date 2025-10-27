@@ -1,0 +1,149 @@
+apiVersion: kubeflow.org/v1
+kind: PyTorchJob
+metadata:
+  name: zimdb-training-4gpu
+  namespace: kubeflow
+spec:
+  # PyTorch 分布式训练配置
+  pytorchReplicaSpecs:
+    Master:
+      replicas: 1
+      restartPolicy: OnFailure
+      template:
+        metadata:
+          labels:
+            app: zimdb-training
+            role: master
+        spec:
+          # 确保所有 Pod 调度到同一个节点
+          affinity:
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+              - labelSelector:
+                  matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                    - zimdb-training
+                topologyKey: kubernetes.io/hostname
+
+          containers:
+          - name: pytorch
+            # 替换为你的镜像仓库地址
+            image: <YOUR_REGISTRY>/zimdb-training:latest
+            imagePullPolicy: Always
+
+            # 训练启动命令
+            command:
+            - torchrun
+            - --nproc_per_node=4
+            - --nnodes=1
+            - --node_rank=0
+            - --master_addr=localhost
+            - --master_port=29500
+            - train.py
+
+            # 资源配置：1 个 T4 GPU (Master)
+            resources:
+              limits:
+                nvidia.com/gpu: 1
+                memory: 16Gi
+                cpu: 4
+              requests:
+                nvidia.com/gpu: 1
+                memory: 8Gi
+                cpu: 2
+
+            # 环境变量
+            env:
+            - name: NCCL_DEBUG
+              value: INFO
+            - name: NCCL_SOCKET_IFNAME
+              value: eth0
+            - name: PYTHONUNBUFFERED
+              value: "1"
+
+            # 数据持久化卷挂载
+            volumeMounts:
+            - name: data-cache
+              mountPath: /mnt/data/.cache
+            - name: dshm
+              mountPath: /dev/shm
+
+          # 卷配置
+          volumes:
+          - name: data-cache
+            persistentVolumeClaim:
+              claimName: zimdb-data-pvc
+          # 增加共享内存，避免 DataLoader 多进程问题
+          - name: dshm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 2Gi
+
+    Worker:
+      replicas: 3
+      restartPolicy: OnFailure
+      template:
+        metadata:
+          labels:
+            app: zimdb-training
+            role: worker
+        spec:
+          # 确保所有 Pod 调度到同一个节点
+          affinity:
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+              - labelSelector:
+                  matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                    - zimdb-training
+                topologyKey: kubernetes.io/hostname
+
+          containers:
+          - name: pytorch
+            # 替换为你的镜像仓库地址
+            image: <YOUR_REGISTRY>/zimdb-training:latest
+            imagePullPolicy: Always
+
+            # Worker 不需要显式命令，由 PyTorchJob 控制器管理
+
+            # 资源配置：每个 Worker 1 个 T4 GPU
+            resources:
+              limits:
+                nvidia.com/gpu: 1
+                memory: 16Gi
+                cpu: 4
+              requests:
+                nvidia.com/gpu: 1
+                memory: 8Gi
+                cpu: 2
+
+            # 环境变量
+            env:
+            - name: NCCL_DEBUG
+              value: INFO
+            - name: NCCL_SOCKET_IFNAME
+              value: eth0
+            - name: PYTHONUNBUFFERED
+              value: "1"
+
+            # 数据持久化卷挂载
+            volumeMounts:
+            - name: data-cache
+              mountPath: /mnt/data/.cache
+            - name: dshm
+              mountPath: /dev/shm
+
+          # 卷配置
+          volumes:
+          - name: data-cache
+            persistentVolumeClaim:
+              claimName: zimdb-data-pvc
+          # 增加共享内存
+          - name: dshm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 2Gi
