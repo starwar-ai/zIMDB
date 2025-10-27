@@ -12,6 +12,7 @@ zIMDB是一个使用PyTorch构建的深度学习项目，用于对IMDB电影评�
 - 🔄 **梯度累积**: 通过梯度累积模拟更大的批次大小
 - 💾 **梯度检查点**: 节省显存，支持更大模型训练
 - 🌐 **分布式训练**: 支持多GPU训练（DistributedDataParallel）
+- ☁️ **Kubeflow 支持**: 支持在 Kubeflow 上使用 4 个 T4 GPU 进行训练
 - 📊 **数据预处理**: 自动化的文本清理和向量化流程
 - 🌐 **Web验证界面**: 提供美观的Web界面进行实时情感分析
 - ⚙️ **简洁配置**: 直接在代码中配置超参数
@@ -90,6 +91,38 @@ uv run torchrun --nproc_per_node=2 train.py
 - 更好的 GPU 利用率
 - 支持跨节点训练
 - 避免 Python GIL 限制
+
+### Kubeflow 分布式训练
+
+项目支持在 Kubeflow 上运行，可以使用一台节点中的 4 个 T4 GPU 进行训练。
+
+```bash
+# 快速部署到 Kubeflow
+./deploy-kubeflow.sh your-registry.com
+
+# 或手动部署
+# 1. 构建并推送镜像
+docker build -t your-registry.com/zimdb-training:latest .
+docker push your-registry.com/zimdb-training:latest
+
+# 2. 更新配置文件中的镜像地址
+sed -i "s|<YOUR_REGISTRY>|your-registry.com|g" kubeflow-pytorchjob-single-node.yaml
+
+# 3. 部署到 Kubeflow
+kubectl apply -f kubeflow-pytorchjob-single-node.yaml
+
+# 4. 查看训练日志
+kubectl logs -f -n kubeflow $(kubectl get pods -n kubeflow -l app=zimdb-training -o jsonpath='{.items[0].metadata.name}')
+```
+
+**Kubeflow 特性**:
+- 🚀 单节点 4 GPU 训练配置
+- ☁️ 云原生部署
+- 📊 资源管理和调度
+- 🔄 自动化工作流
+- 📈 可扩展性
+
+详细的 Kubeflow 部署说明请参考 [KUBEFLOW.md](KUBEFLOW.md)
 
 ### Web 验证页面
 

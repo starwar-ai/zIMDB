@@ -1,0 +1,135 @@
+apiVersion: kubeflow.org/v1
+kind: PyTorchJob
+metadata:
+  name: zimdb-training-single-node-4gpu
+  namespace: kubeflow
+spec:
+  # 单节点 4 GPU 训练配置
+  pytorchReplicaSpecs:
+    Master:
+      replicas: 1
+      restartPolicy: OnFailure
+      template:
+        metadata:
+          labels:
+            app: zimdb-training
+            training-type: single-node-multi-gpu
+        spec:
+          containers:
+          - name: pytorch
+            # 替换为你的镜像仓库地址
+            # 例如: your-registry.com/zimdb-training:latest
+            image: <YOUR_REGISTRY>/zimdb-training:latest
+            imagePullPolicy: Always
+
+            # 单节点多 GPU 训练启动命令
+            command:
+            - torchrun
+            args:
+            - --standalone
+            - --nproc_per_node=4
+            - train.py
+
+            # 资源配置：请求 4 个 T4 GPU
+            resources:
+              limits:
+                nvidia.com/gpu: 4
+                memory: 64Gi
+                cpu: 16
+              requests:
+                nvidia.com/gpu: 4
+                memory: 32Gi
+                cpu: 8
+
+            # 环境变量配置
+            env:
+            # NCCL 调试信息
+            - name: NCCL_DEBUG
+              value: INFO
+            # NCCL 通信接口
+            - name: NCCL_SOCKET_IFNAME
+              value: eth0
+            # 避免输出缓冲
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            # 指定可见的 GPU
+            - name: CUDA_VISIBLE_DEVICES
+              value: "0,1,2,3"
+            # NCCL 性能优化
+            - name: NCCL_IB_DISABLE
+              value: "1"
+            - name: NCCL_P2P_DISABLE
+              value: "0"
+
+            # 挂载卷
+            volumeMounts:
+            # 数据缓存目录
+            - name: data-cache
+              mountPath: /mnt/data/.cache
+            # 共享内存（DataLoader 多进程需要）
+            - name: dshm
+              mountPath: /dev/shm
+            # 模型输出目录
+            - name: model-output
+              mountPath: /workspace/zimdb/models
+
+          # 节点选择器：确保调度到有 4 个 T4 GPU 的节点
+          nodeSelector:
+            # 根据你的集群配置调整
+            accelerator: nvidia-tesla-t4
+            # 或者使用节点标签
+            # node-type: gpu-node
+
+          # 容忍度：允许调度到有特定污点的 GPU 节点
+          tolerations:
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
+
+          # 卷定义
+          volumes:
+          # 持久化数据卷（用于缓存数据集）
+          - name: data-cache
+            persistentVolumeClaim:
+              claimName: zimdb-data-pvc
+          # 共享内存卷
+          - name: dshm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 4Gi
+          # 模型输出卷（用于保存训练好的模型）
+          - name: model-output
+            persistentVolumeClaim:
+              claimName: zimdb-model-pvc
+
+---
+# PersistentVolumeClaim for data cache
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: zimdb-data-pvc
+  namespace: kubeflow
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  # 根据你的存储类配置
+  # storageClassName: standard
+
+---
+# PersistentVolumeClaim for model output
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: zimdb-model-pvc
+  namespace: kubeflow
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  # 根据你的存储类配置
+  # storageClassName: standard

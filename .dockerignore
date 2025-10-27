@@ -1,0 +1,74 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info
+dist
+build
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data and cache
+/mnt/data/
+*.tar.gz
+*.zip
+
+# Models
+*.pth
+*.pt
+models/
+
+# Logs
+*.log
+logs/
+
+# Documentation (除了必要的)
+*.md
+!README.md
+!USAGE.md
+
+# Kubeflow
+*.yaml
+*.yml
+!kubeflow-*.yaml
+
+# Scripts (build 时不需要)
+.github/
+.git/
+
+# Jupyter
+*.ipynb
+.ipynb_checkpoints
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Misc
+*.bak
+*.tmp
+.cache/
