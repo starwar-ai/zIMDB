@@ -13,13 +13,13 @@ zIMDB是一个使用PyTorch构建的深度学习项目，用于对IMDB电影评�
 - 💾 **梯度检查点**: 节省显存，支持更大模型训练
 - 🌐 **分布式训练**: 支持多GPU训练（DistributedDataParallel）
 - 📊 **数据预处理**: 自动化的文本清理和向量化流程
-- 🔌 **ModelScope集成**: 使用ModelScope加载数据集
+- 🌐 **Web验证界面**: 提供美观的Web界面进行实时情感分析
 - ⚙️ **简洁配置**: 直接在代码中配置超参数
 
 ## 技术栈
 
 - **PyTorch**: 深度学习框架
-- **ModelScope**: 数据集加载和管理
+- **Flask**: Web框架用于验证界面
 - **LSTM**: 长短期记忆网络用于序列建模
 - **Embedding**: 词嵌入层用于文本向量化
 
@@ -91,6 +91,27 @@ uv run torchrun --nproc_per_node=2 train.py
 - 支持跨节点训练
 - 避免 Python GIL 限制
 
+### Web 验证页面
+
+训练完成后，可以启动一个美观的 Web 界面来验证模型：
+
+```bash
+# 启动验证页面
+./run_app.sh
+
+# 或使用 uv
+uv run python app.py
+```
+
+然后访问 http://localhost:5000 来使用验证界面。
+
+**验证页面功能**:
+- 🎨 现代化的 UI 设计
+- 📝 文本输入框输入电影评论
+- ⚡ 实时情感分析
+- 📊 显示置信度
+- 💡 内置示例评论
+
 ## 超参数配置
 
 在 `train.py` 文件中可以直接修改以下超参数：
@@ -118,8 +139,8 @@ uv run torchrun --nproc_per_node=2 train.py
 ## 代码结构
 
 ### 1. 数据加载
-- 使用ModelScope加载IMDB数据集
-- 自动缓存数据集到 `/mnt/data/.cache`，避免重复下载
+- 从 Stanford AI Lab 直接下载 IMDB 数据集
+- 自动下载、解压，并缓存到 `/mnt/data/.cache`，避免重复下载
 
 ### 2. 数据预处理
 - 文本清理：移除HTML标签，保留字母和撇号

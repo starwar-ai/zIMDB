@@ -5,11 +5,12 @@ description = "基于PyTorch的IMDB情感分析项目"
 requires-python = ">=3.8"
 dependencies = [
     "torch>=2.0.0",
-    "modelscope>=1.0.0",
+    "requests>=2.25.0",
+    "flask>=2.0.0",
 ]
 
 [project.scripts]
 zimdb-train = "train:main"
 
-[tool.uv]
-dev-dependencies = []
+[dependency-groups]
+dev = []

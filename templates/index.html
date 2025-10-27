@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IMDB 情感分析验证</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            max-width: 800px;
+            width: 100%;
+            padding: 40px;
+        }
+
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 10px;
+            font-size: 2.5em;
+        }
+
+        .subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 1.1em;
+        }
+
+        .input-group {
+            margin-bottom: 25px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #333;
+            font-weight: 600;
+            font-size: 1.1em;
+        }
+
+        textarea {
+            width: 100%;
+            padding: 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 1em;
+            font-family: inherit;
+            resize: vertical;
+            transition: border-color 0.3s;
+        }
+
+        textarea:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        button {
+            width: 100%;
+            padding: 15px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 1.1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.4);
+        }
+
+        button:active {
+            transform: translateY(0);
+        }
+
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .result {
+            margin-top: 30px;
+            padding: 25px;
+            border-radius: 10px;
+            display: none;
+            animation: fadeIn 0.5s;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(-10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .result.show {
+            display: block;
+        }
+
+        .result.positive {
+            background: linear-gradient(135deg, #84fab0 0%, #8fd3f4 100%);
+            color: #2d5a3d;
+        }
+
+        .result.negative {
+            background: linear-gradient(135deg, #ffecd2 0%, #fcb69f 100%);
+            color: #8b4513;
+        }
+
+        .result-title {
+            font-size: 1.5em;
+            font-weight: 700;
+            margin-bottom: 10px;
+        }
+
+        .result-confidence {
+            font-size: 1.2em;
+            margin-top: 10px;
+        }
+
+        .loading {
+            display: none;
+            text-align: center;
+            margin-top: 20px;
+        }
+
+        .loading.show {
+            display: block;
+        }
+
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .examples {
+            margin-top: 30px;
+            padding: 20px;
+            background: #f8f9fa;
+            border-radius: 10px;
+        }
+
+        .examples h3 {
+            color: #333;
+            margin-bottom: 15px;
+            font-size: 1.2em;
+        }
+
+        .example-item {
+            margin-bottom: 10px;
+            padding: 10px;
+            background: white;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .example-item:hover {
+            background: #e9ecef;
+        }
+
+        .example-text {
+            color: #666;
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎬 IMDB 情感分析</h1>
+        <p class="subtitle">使用 LSTM 模型预测电影评论的情感倾向</p>
+
+        <div class="input-group">
+            <label for="review-text">输入电影评论：</label>
+            <textarea id="review-text" rows="6" placeholder="例如：This movie is absolutely fantastic! The acting is superb and the plot is engaging."></textarea>
+        </div>
+
+        <button id="predict-btn" onclick="predict()">分析情感</button>
+
+        <div class="loading" id="loading">
+            <div class="spinner"></div>
+            <p style="margin-top: 10px; color: #666;">正在分析...</p>
+        </div>
+
+        <div class="result" id="result">
+            <div class="result-title" id="result-title"></div>
+            <div class="result-confidence" id="result-confidence"></div>
+        </div>
+
+        <div class="examples">
+            <h3>💡 示例评论</h3>
+            <div class="example-item" onclick="useExample(this)">
+                <div class="example-text">"This movie is absolutely fantastic! The acting is superb and the plot is engaging."</div>
+            </div>
+            <div class="example-item" onclick="useExample(this)">
+                <div class="example-text">"What a terrible film. Boring, poorly acted, and completely waste of time."</div>
+            </div>
+            <div class="example-item" onclick="useExample(this)">
+                <div class="example-text">"I loved every minute of this movie! The cinematography is stunning and the story is heartwarming."</div>
+            </div>
+            <div class="example-item" onclick="useExample(this)">
+                <div class="example-text">"Disappointing. The movie had potential but failed to deliver. Very slow and uninteresting."</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function useExample(element) {
+            const text = element.querySelector('.example-text').textContent;
+            document.getElementById('review-text').value = text;
+        }
+
+        async function predict() {
+            const text = document.getElementById('review-text').value.trim();
+            
+            if (!text) {
+                alert('请输入电影评论');
+                return;
+            }
+
+            const btn = document.getElementById('predict-btn');
+            const loading = document.getElementById('loading');
+            const result = document.getElementById('result');
+
+            // 显示加载状态
+            btn.disabled = true;
+            loading.classList.add('show');
+            result.classList.remove('show');
+
+            try {
+                const response = await fetch('/predict', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ text: text })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    // 显示结果
+                    const resultTitle = document.getElementById('result-title');
+                    const resultConfidence = document.getElementById('result-confidence');
+
+                    if (data.prediction === 'positive') {
+                        result.className = 'result show positive';
+                        resultTitle.textContent = '✅ 正面评价';
+                    } else {
+                        result.className = 'result show negative';
+                        resultTitle.textContent = '❌ 负面评价';
+                    }
+
+                    resultConfidence.textContent = `置信度: ${data.confidence}`;
+                } else {
+                    alert('预测失败: ' + data.error);
+                }
+            } catch (error) {
+                alert('请求失败: ' + error.message);
+            } finally {
+                btn.disabled = false;
+                loading.classList.remove('show');
+            }
+        }
+
+        // 支持回车提交
+        document.getElementById('review-text').addEventListener('keydown', function(e) {
+            if (e.ctrlKey && e.key === 'Enter') {
+                predict();
+            }
+        });
+    </script>
+</body>
+</html>

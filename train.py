@@ -7,13 +7,14 @@ from torch.cuda.amp import autocast, GradScaler
 from torch.utils.checkpoint import checkpoint
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from modelscope.msdatasets import MsDataset
-from modelscope.utils.constant import DownloadMode
 from collections import Counter
 import re
 import time
 import os
 import argparse
+import requests
+import tarfile
+import glob
 
 # --- 1. DDP 初始化函数 ---
 def setup_ddp():
@@ -73,28 +74,95 @@ device = torch.device(f'cuda:{local_rank}' if torch.cuda.is_available() else 'cp
 print(f"Using device: {device} (rank: {rank}/{world_size})")
 
 
-# --- 3. 加载和处理数据 ---
+# --- 3. 下载和加载数据 ---
+
+def download_imdb_dataset(data_dir):
+    """从 Stanford 下载 IMDB 数据集"""
+    url = "https://ai.stanford.edu/~amaas/data/sentiment/aclImdb_v1.tar.gz"
+    tar_path = os.path.join(data_dir, "aclImdb_v1.tar.gz")
+    extract_dir = os.path.join(data_dir, "aclImdb")
+    
+    # 如果已经解压，直接返回
+    if os.path.exists(extract_dir):
+        if rank == 0:
+            print(f"Dataset already exists at {extract_dir}")
+        return extract_dir
+    
+    # 下载文件
+    if not os.path.exists(tar_path):
+        if rank == 0:
+            print(f"Downloading IMDB dataset from {url}...")
+            print(f"Save to: {tar_path}")
+        
+        # 只在主进程下载
+        if rank == 0:
+            response = requests.get(url, stream=True)
+            response.raise_for_status()
+            
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded = 0
+            
+            with open(tar_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total_size > 0:
+                            percent = (downloaded / total_size) * 100
+                            print(f"\rProgress: {percent:.1f}%", end='', flush=True)
+            print("\nDownload complete!")
+        
+        # 等待主进程下载完成
+        if world_size > 1:
+            dist.barrier()
+    
+    # 解压文件
+    if rank == 0:
+        print(f"Extracting {tar_path}...")
+        with tarfile.open(tar_path, 'r:gz') as tar:
+            tar.extractall(data_dir)
+        print("Extraction complete!")
+    
+    # 等待主进程解压完成
+    if world_size > 1:
+        dist.barrier()
+    
+    return extract_dir
+
+def load_imdb_data(data_dir):
+    """加载 IMDB 数据集"""
+    def read_files(folder):
+        texts = []
+        labels = []
+        for label in ['pos', 'neg']:
+            folder_path = os.path.join(data_dir, folder, label)
+            for file_path in glob.glob(os.path.join(folder_path, '*.txt')):
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    texts.append(f.read())
+                    labels.append(label)
+        return texts, labels
+    
+    train_texts, train_labels = read_files('train')
+    test_texts, test_labels = read_files('test')
+    
+    # 转换为字典格式（兼容原有代码）
+    train_data = [{'text': text, 'label': label} for text, label in zip(train_texts, train_labels)]
+    test_data = [{'text': text, 'label': label} for text, label in zip(test_texts, test_labels)]
+    
+    return train_data, test_data
 
 if rank == 0:
-    print("Loading IMDB dataset from ModelScope...")
+    print("Loading IMDB dataset from Stanford AI Lab...")
     print(f"Cache directory: {CACHE_DIR}")
 
-# 使用 ModelScope 加载数据集
-# download_mode=DownloadMode.REUSE_DATASET_IF_EXISTS
-# 这是关键：如果数据集已存在于本地缓存中（设置为 /mnt/data/.cache），
-# 它将直接重用，不会重复下载。
-# cache_dir 参数指定数据集的缓存位置
-data_dict = MsDataset.load(
-    'imdb',
-    download_mode=DownloadMode.REUSE_DATASET_IF_EXISTS,
-    cache_dir=CACHE_DIR
-)
+# 下载数据集
+data_dir = download_imdb_dataset(CACHE_DIR)
+
+# 加载数据
+train_data, test_data = load_imdb_data(data_dir)
 
 if rank == 0:
-    print("Dataset loaded.")
-
-train_data = data_dict['train']
-test_data = data_dict['test']
+    print(f"Dataset loaded. Train: {len(train_data)}, Test: {len(test_data)}")
 
 # 简单的文本清理函数
 def clean_text(text):
@@ -401,6 +469,25 @@ for epoch in range(NUM_EPOCHS):
 
 if rank == 0:
     print("Training finished.")
+    
+    # 保存模型
+    model_path = 'model.pt'
+    vocab_path = 'vocab.pt'
+    
+    # 如果是 DDP 模型，需要提取原始的 model
+    model_to_save = model.module if hasattr(model, 'module') else model
+    
+    print(f"\nSaving model to {model_path}...")
+    torch.save({
+        'model_state_dict': model_to_save.state_dict(),
+        'vocab': vocab,
+        'vocab_size': len(vocab),
+        'embedding_dim': EMBEDDING_DIM,
+        'hidden_dim': HIDDEN_DIM,
+        'output_dim': OUTPUT_DIM,
+        'pad_token': PAD_TOKEN,
+    }, model_path)
+    print(f"Model saved successfully!")
 
 # 清理分布式训练环境
 cleanup_ddp()

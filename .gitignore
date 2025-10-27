@@ -44,4 +44,4 @@ Thumbs.db
 
 # UV
 .venv/
-uv.lock
+# uv.lock  # 取消注释以跟踪依赖版本
