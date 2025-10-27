@@ -81,7 +81,7 @@ uv run train.py
 
 ### 1. 数据加载
 - 使用ModelScope加载IMDB数据集
-- 自动缓存数据集，避免重复下载
+- 自动缓存数据集到 `/mnt/data/.cache`，避免重复下载
 
 ### 2. 数据预处理
 - 文本清理：移除HTML标签，保留字母和撇号
@@ -123,7 +123,8 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 1. **内存要求**: 建议至少8GB RAM用于训练
 2. **GPU支持**: 如有NVIDIA GPU，建议安装CUDA和cuDNN
 3. **首次运行**: 首次运行会下载数据集，需要一些时间
-4. **数据集缓存**: 数据集会自动缓存在 `~/.cache/modelscope/hub`
+4. **数据集缓存**: 数据集会自动缓存在 `/mnt/data/.cache`
+5. **缓存目录**: 如需修改缓存路径，请编辑 `train.py` 中的 `CACHE_DIR` 变量
 
 ## 许可证
 
