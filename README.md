@@ -11,6 +11,7 @@ zIMDB是一个使用PyTorch构建的深度学习项目，用于对IMDB电影评�
 - ⚡ **混合精度训练**: 使用AMP加速训练并减少显存占用
 - 🔄 **梯度累积**: 通过梯度累积模拟更大的批次大小
 - 💾 **梯度检查点**: 节省显存，支持更大模型训练
+- 🌐 **分布式训练**: 支持多GPU训练（DistributedDataParallel）
 - 📊 **数据预处理**: 自动化的文本清理和向量化流程
 - 🔌 **ModelScope集成**: 使用ModelScope加载数据集
 - ⚙️ **简洁配置**: 直接在代码中配置超参数
@@ -59,12 +60,36 @@ uv sync
 
 ## 使用方法
 
-### 运行训练
+### 单 GPU 训练
 
 ```bash
 # 使用 uv 运行训练脚本
 uv run train.py
 ```
+
+### 多 GPU 分布式训练 (DDP)
+
+项目现在支持使用 DistributedDataParallel (DDP) 进行多 GPU 训练，相比 DataParallel 提供更好的性能。
+
+```bash
+# 给运行脚本添加执行权限
+chmod +x run_ddp.sh
+
+# 运行多 GPU 训练（自动检测所有可用 GPU）
+./run_ddp.sh
+
+# 或者手动指定 GPU 数量
+torchrun --nproc_per_node=2 train.py
+
+# 或者使用 uv
+uv run torchrun --nproc_per_node=2 train.py
+```
+
+**DDP 优势**:
+- 更快的训练速度（相比 DataParallel）
+- 更好的 GPU 利用率
+- 支持跨节点训练
+- 避免 Python GIL 限制
 
 ## 超参数配置
 
@@ -125,9 +150,29 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 ## 性能优化详解
 
-本项目实现了三种关键的训练优化技术：
+本项目实现了四种关键的训练优化技术：
 
-### 1. 混合精度训练 (AMP)
+### 1. 分布式数据并行 (DDP)
+
+**作用**: 使用多个 GPU 并行训练，每个 GPU 处理不同的数据批次
+**优势**:
+- 🚀 训练速度随 GPU 数量线性增长
+- 💪 避免 Python GIL 限制（使用多进程）
+- 🎯 每个 GPU 维护独立的模型副本
+- 📊 自动同步梯度和参数
+
+**实现**: 使用 `torch.nn.parallel.DistributedDataParallel` 和 `DistributedSampler`
+
+**使用方法**:
+```bash
+# 2 GPU 训练
+torchrun --nproc_per_node=2 train.py
+
+# 4 GPU 训练
+torchrun --nproc_per_node=4 train.py
+```
+
+### 2. 混合精度训练 (AMP)
 
 **作用**: 使用16位浮点数（FP16）进行计算，同时保持32位浮点数（FP32）的精度
 **优势**:
@@ -137,7 +182,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 **实现**: 使用 `torch.cuda.amp` 的 `autocast` 和 `GradScaler`
 
-### 2. 梯度累积 (Gradient Accumulation)
+### 3. 梯度累积 (Gradient Accumulation)
 
 **作用**: 多个小批次累积梯度后再更新参数，模拟更大的批次大小
 **优势**:
@@ -147,7 +192,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 **实现**: 每 4 步累积后才调用 `optimizer.step()`
 
-### 3. 梯度检查点 (Gradient Checkpointing)
+### 4. 梯度检查点 (Gradient Checkpointing)
 
 **作用**: 在前向传播时不保存中间激活值，反向传播时重新计算
 **优势**:
@@ -161,10 +206,12 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 | 配置 | 显存占用 | 训练速度 | 有效批次大小 |
 |------|---------|---------|------------|
-| 基础配置 | 100% | 1.0x | 64 |
+| 基础配置 (单GPU) | 100% | 1.0x | 64 |
 | +AMP | 50% | 1.5-2x | 64 |
 | +梯度累积 | 50% | 1.5-2x | 256 |
 | +梯度检查点 | 35% | 1.2-1.6x | 256 |
+| +DDP (2 GPUs) | 35% | 2.0-2.4x | 512 |
+| +DDP (4 GPUs) | 35% | 3.5-4.5x | 1024 |
 
 ## 输出信息
 
@@ -181,6 +228,10 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 3. **首次运行**: 首次运行会下载数据集，需要一些时间
 4. **数据集缓存**: 数据集会自动缓存在 `/mnt/data/.cache`
 5. **缓存目录**: 如需修改缓存路径，请编辑 `train.py` 中的 `CACHE_DIR` 变量
+6. **DDP 训练**:
+   - 使用 `torchrun` 启动多 GPU 训练
+   - 确保所有 GPU 可见（`nvidia-smi` 检查）
+   - 单 GPU 训练时无需使用 `torchrun`，直接运行 `python train.py` 即可
 
 ## 许可证
 

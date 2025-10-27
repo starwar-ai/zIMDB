@@ -2,20 +2,53 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
+from torch.utils.data.distributed import DistributedSampler
 from torch.cuda.amp import autocast, GradScaler
 from torch.utils.checkpoint import checkpoint
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 from modelscope.msdatasets import MsDataset
 from modelscope.utils.constant import DownloadMode
 from collections import Counter
 import re
 import time
 import os
+import argparse
 
-# --- 1. 设置缓存目录 ---
+# --- 1. DDP 初始化函数 ---
+def setup_ddp():
+    """初始化分布式训练环境"""
+    # 解析命令行参数
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--local_rank', type=int, default=-1, help='Local rank for distributed training')
+    args = parser.parse_args()
+
+    # 从环境变量获取分布式训练参数（torchrun 会自动设置这些）
+    local_rank = int(os.environ.get('LOCAL_RANK', args.local_rank))
+    world_size = int(os.environ.get('WORLD_SIZE', 1))
+    rank = int(os.environ.get('RANK', 0))
+
+    # 初始化分布式进程组
+    if world_size > 1:
+        dist.init_process_group(backend='nccl')
+        torch.cuda.set_device(local_rank)
+        print(f"Initialized DDP: rank={rank}, local_rank={local_rank}, world_size={world_size}")
+    else:
+        local_rank = 0
+        print("Running in single-GPU mode (no DDP)")
+
+    return local_rank, world_size, rank
+
+def cleanup_ddp():
+    """清理分布式训练环境"""
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+# --- 2. 设置缓存目录 ---
 CACHE_DIR = '/mnt/data/.cache'
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-# --- 2. 定义超参数 ---
+# --- 3. 定义超参数 ---
 VOCAB_SIZE = 10000       # 词汇表大小
 MAX_LEN = 250            # 句子最大长度
 EMBEDDING_DIM = 128
@@ -32,15 +65,20 @@ USE_AMP = True                    # 启用混合精度训练
 GRADIENT_ACCUMULATION_STEPS = 4   # 梯度累积步数 (有效batch = BATCH_SIZE * 4 = 256)
 USE_GRADIENT_CHECKPOINTING = True # 启用梯度检查点节省显存
 
-# 检查是否有可用的GPU
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f"Using device: {device}")
+# 初始化 DDP
+local_rank, world_size, rank = setup_ddp()
+
+# 设置设备
+device = torch.device(f'cuda:{local_rank}' if torch.cuda.is_available() else 'cpu')
+print(f"Using device: {device} (rank: {rank}/{world_size})")
 
 
 # --- 3. 加载和处理数据 ---
 
-print("Loading IMDB dataset from ModelScope...")
-print(f"Cache directory: {CACHE_DIR}")
+if rank == 0:
+    print("Loading IMDB dataset from ModelScope...")
+    print(f"Cache directory: {CACHE_DIR}")
+
 # 使用 ModelScope 加载数据集
 # download_mode=DownloadMode.REUSE_DATASET_IF_EXISTS
 # 这是关键：如果数据集已存在于本地缓存中（设置为 /mnt/data/.cache），
@@ -51,7 +89,9 @@ data_dict = MsDataset.load(
     download_mode=DownloadMode.REUSE_DATASET_IF_EXISTS,
     cache_dir=CACHE_DIR
 )
-print("Dataset loaded.")
+
+if rank == 0:
+    print("Dataset loaded.")
 
 train_data = data_dict['train']
 test_data = data_dict['test']
@@ -77,9 +117,11 @@ def build_vocab(data, vocab_size):
     vocab['<UNK>'] = UNK_TOKEN
     return vocab
 
-print("Building vocabulary...")
+if rank == 0:
+    print("Building vocabulary...")
 vocab = build_vocab(train_data, VOCAB_SIZE)
-print(f"Vocabulary size: {len(vocab)}")
+if rank == 0:
+    print(f"Vocabulary size: {len(vocab)}")
 
 # 自定义 PyTorch Dataset
 class ImdbDataset(Dataset):
@@ -111,8 +153,15 @@ class ImdbDataset(Dataset):
 train_dataset = ImdbDataset(train_data, vocab, MAX_LEN)
 test_dataset = ImdbDataset(test_data, vocab, MAX_LEN)
 
-train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE)
+# 使用 DistributedSampler 确保每个进程处理不同的数据
+if world_size > 1:
+    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
+    test_sampler = DistributedSampler(test_dataset, num_replicas=world_size, rank=rank, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, sampler=train_sampler)
+    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, sampler=test_sampler)
+else:
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE)
 
 
 # --- 4. 定义 PyTorch 模型 (LSTM) ---
@@ -175,6 +224,12 @@ model = SentimentLSTM(len(vocab), EMBEDDING_DIM, HIDDEN_DIM, OUTPUT_DIM, PAD_TOK
                       use_checkpointing=USE_GRADIENT_CHECKPOINTING)
 model.to(device)
 
+# 使用 DistributedDataParallel 包装模型
+if world_size > 1:
+    model = DDP(model, device_ids=[local_rank], output_device=local_rank)
+    if rank == 0:
+        print(f"Model wrapped with DistributedDataParallel")
+
 # 损失函数: BCEWithLogitsLoss
 # (它内置了Sigmoid，比单独用Sigmoid+BCELoss更稳定)
 criterion = nn.BCEWithLogitsLoss()
@@ -183,11 +238,15 @@ optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 # 初始化混合精度训练的GradScaler
 scaler = GradScaler() if USE_AMP else None
 
-print(f"\n性能优化设置:")
-print(f"  混合精度训练 (AMP): {USE_AMP}")
-print(f"  梯度累积步数: {GRADIENT_ACCUMULATION_STEPS}")
-print(f"  有效批次大小: {BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS}")
-print(f"  梯度检查点: {USE_GRADIENT_CHECKPOINTING}")
+if rank == 0:
+    print(f"\n性能优化设置:")
+    print(f"  混合精度训练 (AMP): {USE_AMP}")
+    print(f"  梯度累积步数: {GRADIENT_ACCUMULATION_STEPS}")
+    print(f"  有效批次大小: {BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS}")
+    print(f"  梯度检查点: {USE_GRADIENT_CHECKPOINTING}")
+    print(f"  分布式训练: {'DDP' if world_size > 1 else 'Single GPU'}")
+    if world_size > 1:
+        print(f"  全局批次大小: {BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS * world_size}")
 
 # --- 6. 训练和评估函数 ---
 
@@ -267,32 +326,64 @@ def train_epoch(model, loader, optimizer, criterion, scaler=None, accumulation_s
             optimizer.step()
         optimizer.zero_grad()
 
-    return epoch_loss / len(loader), epoch_acc / len(loader)
+    # 在分布式训练中，需要聚合所有进程的损失和准确率
+    if dist.is_initialized():
+        # 将损失和准确率转换为张量
+        metrics = torch.tensor([epoch_loss, epoch_acc, len(loader)], device=device)
+        # 所有进程的 metrics 求和
+        dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
+        # 平均
+        epoch_loss = metrics[0].item() / metrics[2].item()
+        epoch_acc = metrics[1].item() / metrics[2].item()
+    else:
+        epoch_loss = epoch_loss / len(loader)
+        epoch_acc = epoch_acc / len(loader)
+
+    return epoch_loss, epoch_acc
 
 def evaluate_epoch(model, loader, criterion):
     epoch_loss = 0
     epoch_acc = 0
-    
+
     model.eval() # 设置为评估模式
-    
+
     with torch.no_grad(): # 评估时不需要计算梯度
         for (text, labels) in loader:
             text, labels = text.to(device), labels.to(device)
-            
+
             predictions = model(text)
             loss = criterion(predictions, labels)
             acc = calculate_accuracy(predictions, labels)
-            
+
             epoch_loss += loss.item()
             epoch_acc += acc.item()
-            
-    return epoch_loss / len(loader), epoch_acc / len(loader)
+
+    # 在分布式训练中，需要聚合所有进程的损失和准确率
+    if dist.is_initialized():
+        # 将损失和准确率转换为张量
+        metrics = torch.tensor([epoch_loss, epoch_acc, len(loader)], device=device)
+        # 所有进程的 metrics 求和
+        dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
+        # 平均
+        epoch_loss = metrics[0].item() / metrics[2].item()
+        epoch_acc = metrics[1].item() / metrics[2].item()
+    else:
+        epoch_loss = epoch_loss / len(loader)
+        epoch_acc = epoch_acc / len(loader)
+
+    return epoch_loss, epoch_acc
 
 
 # --- 7. 运行训练循环 ---
 
-print("\nStarting training...")
+if rank == 0:
+    print("\nStarting training...")
+
 for epoch in range(NUM_EPOCHS):
+    # 设置 sampler 的 epoch（确保每个 epoch 的数据洗牌不同）
+    if world_size > 1:
+        train_sampler.set_epoch(epoch)
+
     start_time = time.time()
 
     train_loss, train_acc = train_epoch(model, train_loader, optimizer, criterion,
@@ -303,8 +394,13 @@ for epoch in range(NUM_EPOCHS):
     end_time = time.time()
     epoch_mins, epoch_secs = divmod(end_time - start_time, 60)
 
-    print(f'Epoch: {epoch+1:02} | Epoch Time: {epoch_mins:.0f}m {epoch_secs:.0f}s')
-    print(f'\tTrain Loss: {train_loss:.3f} | Train Acc: {train_acc*100:.2f}%')
-    print(f'\tTest. Loss: {test_loss:.3f} | Test. Acc: {test_acc*100:.2f}%')
+    if rank == 0:
+        print(f'Epoch: {epoch+1:02} | Epoch Time: {epoch_mins:.0f}m {epoch_secs:.0f}s')
+        print(f'\tTrain Loss: {train_loss:.3f} | Train Acc: {train_acc*100:.2f}%')
+        print(f'\tTest. Loss: {test_loss:.3f} | Test. Acc: {test_acc*100:.2f}%')
 
-print("Training finished.")
+if rank == 0:
+    print("Training finished.")
+
+# 清理分布式训练环境
+cleanup_ddp()
