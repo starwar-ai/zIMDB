@@ -7,8 +7,13 @@ from modelscope.utils.constant import DownloadMode
 from collections import Counter
 import re
 import time
+import os
 
-# --- 1. 定义超参数 ---
+# --- 1. 设置缓存目录 ---
+CACHE_DIR = '/mnt/data/.cache'
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+# --- 2. 定义超参数 ---
 VOCAB_SIZE = 10000       # 词汇表大小
 MAX_LEN = 250            # 句子最大长度
 EMBEDDING_DIM = 128
@@ -25,16 +30,19 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
 
 
-# --- 2. 加载和处理数据 ---
+# --- 3. 加载和处理数据 ---
 
 print("Loading IMDB dataset from ModelScope...")
+print(f"Cache directory: {CACHE_DIR}")
 # 使用 ModelScope 加载数据集
 # download_mode=DownloadMode.REUSE_DATASET_IF_EXISTS
-# 这是关键：如果数据集已存在于本地缓存中（通常是 ~/.cache/modelscope/hub），
+# 这是关键：如果数据集已存在于本地缓存中（设置为 /mnt/data/.cache），
 # 它将直接重用，不会重复下载。
+# cache_dir 参数指定数据集的缓存位置
 data_dict = MsDataset.load(
     'imdb',
-    download_mode=DownloadMode.REUSE_DATASET_IF_EXISTS
+    download_mode=DownloadMode.REUSE_DATASET_IF_EXISTS,
+    cache_dir=CACHE_DIR
 )
 print("Dataset loaded.")
 
@@ -100,7 +108,7 @@ train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
 test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE)
 
 
-# --- 3. 定义 PyTorch 模型 (LSTM) ---
+# --- 4. 定义 PyTorch 模型 (LSTM) ---
 
 class SentimentLSTM(nn.Module):
     def __init__(self, vocab_size, embedding_dim, hidden_dim, output_dim, pad_idx):
@@ -142,7 +150,7 @@ class SentimentLSTM(nn.Module):
         return output.squeeze(1)
 
 
-# --- 4. 实例化模型、损失函数和优化器 ---
+# --- 5. 实例化模型、损失函数和优化器 ---
 
 model = SentimentLSTM(len(vocab), EMBEDDING_DIM, HIDDEN_DIM, OUTPUT_DIM, PAD_TOKEN)
 model.to(device)
@@ -152,7 +160,7 @@ model.to(device)
 criterion = nn.BCEWithLogitsLoss()
 optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
-# --- 5. 训练和评估函数 ---
+# --- 6. 训练和评估函数 ---
 
 def calculate_accuracy(preds, y):
     """计算准确率"""
@@ -214,7 +222,7 @@ def evaluate_epoch(model, loader, criterion):
     return epoch_loss / len(loader), epoch_acc / len(loader)
 
 
-# --- 6. 运行训练循环 ---
+# --- 7. 运行训练循环 ---
 
 print("\nStarting training...")
 for epoch in range(NUM_EPOCHS):
